@@ -96,7 +96,7 @@ class BSBIIndex:
     def invert_write(self, td_pairs, index):
         """
         Melakukan inversion td_pairs (list of <termID, docID> pairs) dan
-        menyimpan mereka ke index. Disini diterapkan konsep BSBI dimana 
+        menyimpan mereka ke index. Disini diterapkan konsep BSBI dimana
         hanya di-mantain satu dictionary besar untuk keseluruhan block.
         Namun dalam teknik penyimpanannya digunakan srategi dari SPIMI
         yaitu penggunaan struktur data hashtable (dalam Python bisa
@@ -177,7 +177,7 @@ class BSBIIndex:
         Score = untuk setiap term di query, akumulasikan w(t, Q) * w(t, D).
                 (tidak perlu dinormalisasi dengan panjang dokumen)
 
-        catatan: 
+        catatan:
             1. informasi DF(t) ada di dictionary postings_dict pada merged index
             2. informasi TF(t, D) ada di tf_li
             3. informasi N bisa didapat dari doc_length pada merged index, len(doc_length)
@@ -222,6 +222,89 @@ class BSBIIndex:
             # Top-K
             docs = [(score, self.doc_id_map[doc_id]) for (doc_id, score) in scores.items()]
             return sorted(docs, key = lambda x: x[0], reverse = True)[:k]
+
+    def retrieve_bm25(self, query, k=10, k1=1.2, b=0.75):
+        """
+        Melakukan Ranked Retrieval dengan skema TaaT (Term-at-a-Time)
+        menggunakan scoring BM25. Method akan mengembalikan top-K retrieval results.
+
+        Formula BM25:
+            Score(D, Q) = Σ IDF(t) * (tf(t,D) * (k1 + 1)) /
+                          (tf(t,D) + k1 * (1 - b + b * |D| / avgdl))
+
+        dengan IDF (Robertson variant):
+            IDF(t) = log((N - df(t) + 0.5) / (df(t) + 0.5) + 1)
+
+        Panjang dokumen (|D|) dan total token sudah tersedia di doc_length
+        yang disimpan pada merged index saat proses indexing. Rata-rata
+        panjang dokumen (avgdl) dihitung langsung dari doc_length tersebut.
+
+        Parameters
+        ----------
+        query : str
+            Query tokens yang dipisahkan oleh spasi.
+            Contoh: "universitas indonesia depok"
+
+        k : int
+            Jumlah top dokumen yang dikembalikan (default: 10)
+
+        k1 : float
+            Parameter BM25 untuk mengontrol saturasi term frequency.
+            Nilai umum: 1.2 – 2.0 (default: 1.2)
+
+        b : float
+            Parameter BM25 untuk mengontrol normalisasi panjang dokumen.
+            0 = tanpa normalisasi, 1 = normalisasi penuh (default: 0.75)
+
+        Result
+        ------
+        List[(float, str)]
+            List of tuple: elemen pertama adalah score similarity, dan yang
+            kedua adalah nama dokumen.
+            Daftar Top-K dokumen terurut mengecil BERDASARKAN SKOR.
+
+        JANGAN LEMPAR ERROR/EXCEPTION untuk terms yang TIDAK ADA di collection.
+        """
+        if len(self.term_id_map) == 0 or len(self.doc_id_map) == 0:
+            self.load()
+
+        terms = [self.term_id_map[word] for word in query.split()]
+
+        with InvertedIndexReader(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as merged_index:
+
+            N = len(merged_index.doc_length)
+
+            # Hitung avgdl (rata-rata panjang dokumen) dari doc_length yang
+            # sudah di-pre-komputasi saat indexing
+            avgdl = sum(merged_index.doc_length.values()) / N if N > 0 else 1
+
+            scores = {}
+            for term in terms:
+                if term not in merged_index.postings_dict:
+                    continue  # abaikan term yang tidak ada di collection
+
+                df = merged_index.postings_dict[term][1]
+
+                # IDF versi Robertson (selalu positif)
+                idf = math.log((N - df + 0.5) / (df + 0.5) + 1)
+
+                postings, tf_list = merged_index.get_postings_list(term)
+                for doc_id, tf in zip(postings, tf_list):
+                    dl = merged_index.doc_length.get(doc_id, 0)
+
+                    # BM25 term weight
+                    numerator = tf * (k1 + 1)
+                    denominator = tf + k1 * (1 - b + b * dl / avgdl)
+                    bm25_weight = idf * (numerator / denominator)
+
+                    if doc_id not in scores:
+                        scores[doc_id] = 0.0
+                    scores[doc_id] += bm25_weight
+
+        docs = [(score, self.doc_id_map[doc_id])
+                for doc_id, score in scores.items()]
+        return sorted(docs, key=lambda x: x[0], reverse=True)[:k]
 
     def index(self):
         """

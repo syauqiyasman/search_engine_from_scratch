@@ -53,38 +53,82 @@ def load_qrels(qrel_file = "qrels.txt", max_q_id = 30, max_doc_id = 1033):
 
 ######## >>>>> EVALUASI !
 
-def eval(qrels, query_file = "queries.txt", k = 1000):
-  """ 
+def eval_tfidf(qrels, query_file = "queries.txt", k = 1000):
+    """
+    Evaluasi ranking menggunakan TF-IDF.
     loop ke semua 30 query, hitung score di setiap query,
     lalu hitung MEAN SCORE over those 30 queries.
     untuk setiap query, kembalikan top-1000 documents
-  """
-  BSBI_instance = BSBIIndex(data_dir = 'collection', \
-                          postings_encoding = VBEPostings, \
-                          output_dir = 'index')
+    """
+    BSBI_instance = BSBIIndex(data_dir = 'collection', \
+                              postings_encoding = VBEPostings, \
+                              output_dir='index')
 
-  with open(query_file) as file:
-    rbp_scores = []
-    for qline in file:
-      parts = qline.strip().split()
-      qid = parts[0]
-      query = " ".join(parts[1:])
+    with open(query_file) as file:
+        rbp_scores = []
+        for qline in file:
+            parts = qline.strip().split()
+            qid = parts[0]
+            query = " ".join(parts[1:])
 
-      # HATI-HATI, doc id saat indexing bisa jadi berbeda dengan doc id
-      # yang tertera di qrels
-      ranking = []
-      for (score, doc) in BSBI_instance.retrieve_tfidf(query, k = k):
-          did = int(re.search(r'\/.*\/.*\/(.*)\.txt', doc).group(1))
-          ranking.append(qrels[qid][did])
-      rbp_scores.append(rbp(ranking))
+            # HATI-HATI, doc id saat indexing bisa jadi berbeda dengan doc id
+            # yang tertera di qrels
+            ranking = []
+            for (score, doc) in BSBI_instance.retrieve_tfidf(query, k=k):
+                did = int(re.search(r'\/.*\/.*\/(.*)\.txt', doc).group(1))
+                ranking.append(qrels[qid][did])
+            rbp_scores.append(rbp(ranking))
 
-  print("Hasil evaluasi TF-IDF terhadap 30 queries")
-  print("RBP score =", sum(rbp_scores) / len(rbp_scores))
+    print("Hasil evaluasi TF-IDF terhadap 30 queries")
+    print("RBP score =", sum(rbp_scores) / len(rbp_scores))
+
+def eval_bm25(qrels, query_file="queries.txt", k=1000, k1=1.2, b=0.75):
+    """
+    Evaluasi ranking menggunakan BM25.
+    Loop ke semua query, hitung RBP score di setiap query,
+    lalu print mean RBP score.
+
+    Parameters
+    ----------
+    k1 : float
+        Parameter saturasi TF pada BM25 (default: 1.2)
+    b : float
+        Parameter normalisasi panjang dokumen pada BM25 (default: 0.75)
+    """
+    BSBI_instance = BSBIIndex(data_dir='collection',
+                              postings_encoding=VBEPostings,
+                              output_dir='index')
+
+    with open(query_file) as file:
+        rbp_scores = []
+        for qline in file:
+            parts = qline.strip().split()
+            qid = parts[0]
+            query = " ".join(parts[1:])
+
+            ranking = []
+            for (score, doc) in BSBI_instance.retrieve_bm25(query, k=k, k1=k1, b=b):
+                did = int(re.search(r'\/.*\/.*\/(.*)\.txt', doc).group(1))
+                ranking.append(qrels[qid][did])
+            rbp_scores.append(rbp(ranking))
+
+    print(f"Hasil evaluasi BM25 (k1={k1}, b={b}) terhadap 30 queries")
+    print("RBP score =", sum(rbp_scores) / len(rbp_scores))
+
+
+# Alias untuk backward-compatibility
+def eval(qrels, query_file="queries.txt", k=1000):
+    return eval_tfidf(qrels, query_file=query_file, k=k)
+
 
 if __name__ == '__main__':
-  qrels = load_qrels()
+    qrels = load_qrels()
 
-  assert qrels["Q1"][166] == 1, "qrels salah"
-  assert qrels["Q1"][300] == 0, "qrels salah"
+    assert qrels["Q1"][166] == 1, "qrels salah"
+    assert qrels["Q1"][300] == 0, "qrels salah"
 
-  eval(qrels)
+    print("=" * 50)
+    eval_tfidf(qrels)
+
+    print("=" * 50)
+    eval_bm25(qrels)
