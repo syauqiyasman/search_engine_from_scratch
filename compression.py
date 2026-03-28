@@ -237,11 +237,127 @@ class VBEPostings:
         """
         return VBEPostings.vb_decode(encoded_tf_list)
 
+class EliasGammaPostings:
+    """
+    Implementasi Elias-Gamma Encoding untuk postings list.
+    Sama seperti VBE, kita gunakan gap-based encoding untuk postings.
+    """
+
+    @staticmethod
+    def gamma_encode_number(number):
+        """
+        Encode satu angka dengan Elias-Gamma
+        """
+        if number <= 0:
+            raise ValueError("Elias-Gamma hanya untuk bilangan positif")
+
+        binary = bin(number)[2:]  # buang '0b'
+        length = len(binary)
+
+        unary = '0' * (length - 1) + '1'
+        offset = binary[1:]  # buang leading 1
+
+        return unary + offset
+
+    @staticmethod
+    def gamma_encode(list_of_numbers):
+        """
+        Encode list of numbers jadi bitstring
+        """
+        bitstream = ""
+        for number in list_of_numbers:
+            bitstream += EliasGammaPostings.gamma_encode_number(number)
+
+        # padding ke kelipatan 8 bit
+        padding = (8 - len(bitstream) % 8) % 8
+        bitstream += '0' * padding
+
+        # convert ke bytes
+        byte_array = bytearray()
+        for i in range(0, len(bitstream), 8):
+            byte_array.append(int(bitstream[i:i+8], 2))
+
+        return bytes(byte_array)
+
+    @staticmethod
+    def encode(postings_list):
+        """
+        Encode postings list dengan gap + Elias-Gamma
+        """
+        gap_postings_list = [postings_list[0]]
+        for i in range(1, len(postings_list)):
+            gap_postings_list.append(postings_list[i] - postings_list[i-1])
+
+        return EliasGammaPostings.gamma_encode(gap_postings_list)
+
+    @staticmethod
+    def encode_tf(tf_list):
+        return EliasGammaPostings.gamma_encode(tf_list)
+
+    @staticmethod
+    def gamma_decode(encoded_bytes):
+        """
+        Decode bytes menjadi list of numbers
+        """
+        # convert bytes ke bitstring
+        bitstream = ""
+        for byte in encoded_bytes:
+            bitstream += f"{byte:08b}"
+
+        numbers = []
+        i = 0
+        n = len(bitstream)
+
+        while i < n:
+            # hitung unary (jumlah 0 sebelum 1)
+            zeros = 0
+            while i < n and bitstream[i] == '0':
+                zeros += 1
+                i += 1
+
+            if i >= n:
+                break
+
+            i += 1  # skip '1'
+
+            # ambil offset
+            if i + zeros > n:
+                break
+
+            offset = bitstream[i:i+zeros]
+            i += zeros
+
+            binary = '1' + offset
+            number = int(binary, 2)
+            numbers.append(number)
+
+        return numbers
+
+    @staticmethod
+    def decode(encoded_postings_list):
+        """
+        Decode postings (ingat: masih gap-based → harus direkonstruksi)
+        """
+        decoded_gaps = EliasGammaPostings.gamma_decode(encoded_postings_list)
+
+        total = decoded_gaps[0]
+        postings = [total]
+
+        for i in range(1, len(decoded_gaps)):
+            total += decoded_gaps[i]
+            postings.append(total)
+
+        return postings
+
+    @staticmethod
+    def decode_tf(encoded_tf_list):
+        return EliasGammaPostings.gamma_decode(encoded_tf_list)
+
 if __name__ == '__main__':
     
     postings_list = [34, 67, 89, 454, 2345738]
     tf_list = [12, 10, 3, 4, 1]
-    for Postings in [StandardPostings, VBEPostings]:
+    for Postings in [StandardPostings, VBEPostings, EliasGammaPostings]:
         print(Postings.__name__)
         encoded_postings_list = Postings.encode(postings_list)
         encoded_tf_list = Postings.encode_tf(tf_list)
