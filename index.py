@@ -14,14 +14,15 @@ class InvertedIndex:
             termID -> (start_position_in_index_file,
                        number_of_postings_in_list,
                        length_in_bytes_of_postings_list,
-                       length_in_bytes_of_tf_list)
+                       length_in_bytes_of_tf_list,
+                       max_tf_in_postings_list)
 
         postings_dict adalah konsep "Dictionary" yang merupakan bagian dari
         Inverted Index. postings_dict ini diasumsikan dapat dimuat semuanya
         di memori.
 
         Seperti namanya, "Dictionary" diimplementasikan sebagai python's Dictionary
-        yang memetakan term ID (integer) ke 4-tuple:
+        yang memetakan term ID (integer) ke 5-tuple:
            1. start_position_in_index_file : (dalam satuan bytes) posisi dimana
               postings yang bersesuaian berada di file (storage). Kita bisa
               menggunakan operasi "seek" untuk mencapainya.
@@ -31,12 +32,16 @@ class InvertedIndex:
               satuan byte.
            4. length_in_bytes_of_tf_list : panjang list of term frequencies dari
               postings list terkait dalam satuan byte
+           5. max_tf_in_postings_list : nilai TF maksimum di antara semua dokumen
+              pada postings list ini. Digunakan untuk menghitung upper bound skor
+              BM25 per term pada algoritma WAND Top-K Retrieval.
 
     terms: List[int]
         List of terms IDs, untuk mengingat urutan terms yang dimasukan ke
         dalam Inverted Index.
 
     """
+
     def __init__(self, index_name, postings_encoding, directory=''):
         """
         Parameters
@@ -47,17 +52,17 @@ class InvertedIndex:
         directory (str): directory dimana file index berada
         """
 
-        self.index_file_path = os.path.join(directory, index_name+'.index')
-        self.metadata_file_path = os.path.join(directory, index_name+'.dict')
+        self.index_file_path = os.path.join(directory, index_name + '.index')
+        self.metadata_file_path = os.path.join(directory, index_name + '.dict')
 
         self.postings_encoding = postings_encoding
         self.directory = directory
 
         self.postings_dict = {}
-        self.terms = []         # Untuk keep track urutan term yang dimasukkan ke index
-        self.doc_length = {}    # key: doc ID (int), value: document length (number of tokens)
-                                # Ini nantinya akan berguna untuk normalisasi Score terhadap panjang
-                                # dokumen saat menghitung score dengan TF-IDF atau BM25
+        self.terms = []  # Untuk keep track urutan term yang dimasukkan ke index
+        self.doc_length = {}  # key: doc ID (int), value: document length (number of tokens)
+        # Ini nantinya akan berguna untuk normalisasi Score terhadap panjang
+        # dokumen saat menghitung score dengan TF-IDF atau BM25
 
     def __enter__(self):
         """
@@ -104,6 +109,7 @@ class InvertedIndexReader(InvertedIndex):
     Class yang mengimplementasikan bagaimana caranya scan atau membaca secara
     efisien Inverted Index yang disimpan di sebuah file.
     """
+
     def __iter__(self):
         return self
 
@@ -113,7 +119,7 @@ class InvertedIndexReader(InvertedIndex):
         term ke awal
         """
         self.index_file.seek(0)
-        self.term_iter = self.terms.__iter__() # reset term iterator
+        self.term_iter = self.terms.__iter__()  # reset term iterator
 
     def __next__(self):
         """
@@ -131,7 +137,10 @@ class InvertedIndexReader(InvertedIndex):
         diproses di memori. JANGAN MEMUAT SEMUA INDEX DI MEMORI!
         """
         curr_term = next(self.term_iter)
-        pos, number_of_postings, len_in_bytes_of_postings, len_in_bytes_of_tf = self.postings_dict[curr_term]
+        # Gunakan [:4] agar kompatibel dengan 5-tuple (elemen ke-4 = max_tf
+        # yang ditambahkan untuk keperluan WAND upper bound).
+        pos, number_of_postings, len_in_bytes_of_postings, len_in_bytes_of_tf = \
+            self.postings_dict[curr_term][:4]
         postings_list = self.postings_encoding.decode(self.index_file.read(len_in_bytes_of_postings))
         tf_list = self.postings_encoding.decode_tf(self.index_file.read(len_in_bytes_of_tf))
         return (curr_term, postings_list, tf_list)
@@ -147,7 +156,8 @@ class InvertedIndexReader(InvertedIndex):
         byte tertentu pada file (index file) dimana postings list (dan juga
         list of TF) dari term disimpan.
         """
-        pos, number_of_postings, len_in_bytes_of_postings, len_in_bytes_of_tf = self.postings_dict[term]
+        pos, number_of_postings, len_in_bytes_of_postings, len_in_bytes_of_tf = \
+            self.postings_dict[term][:4]
         self.index_file.seek(pos)
         postings_list = self.postings_encoding.decode(self.index_file.read(len_in_bytes_of_postings))
         tf_list = self.postings_encoding.decode_tf(self.index_file.read(len_in_bytes_of_tf))
@@ -159,24 +169,26 @@ class InvertedIndexWriter(InvertedIndex):
     Class yang mengimplementasikan bagaimana caranya menulis secara
     efisien Inverted Index yang disimpan di sebuah file.
     """
+
     def __enter__(self):
         self.index_file = open(self.index_file_path, 'wb+')
         return self
 
     def append(self, term, postings_list, tf_list):
         """
-        Menambahkan (append) sebuah term, postings_list, dan juga TF list 
+        Menambahkan (append) sebuah term, postings_list, dan juga TF list
         yang terasosiasi ke posisi akhir index file.
 
         Method ini melakukan 4 hal:
         1. Encode postings_list menggunakan self.postings_encoding (method encode),
         2. Encode tf_list menggunakan self.postings_encoding (method encode_tf),
         3. Menyimpan metadata dalam bentuk self.terms, self.postings_dict, dan self.doc_length.
-           Ingat kembali bahwa self.postings_dict memetakan sebuah termID ke
-           sebuah 4-tuple: - start_position_in_index_file
+           self.postings_dict memetakan sebuah termID ke sebuah 5-tuple:
+                           - start_position_in_index_file
                            - number_of_postings_in_list
                            - length_in_bytes_of_postings_list
                            - length_in_bytes_of_tf_list
+                           - max_tf_in_postings_list  ← baru, untuk WAND upper bound
         4. Menambahkan (append) bystream dari postings_list yang sudah di-encode dan
            tf_list yang sudah di-encode ke posisi akhir index file di harddisk.
 
@@ -199,7 +211,7 @@ class InvertedIndexWriter(InvertedIndex):
         tf_list: List[Int]
             List of term frequencies
         """
-        self.terms.append(term) # update self.terms
+        self.terms.append(term)  # update self.terms
 
         # update self.doc_length
         for i in range(len(postings_list)):
@@ -214,29 +226,40 @@ class InvertedIndexWriter(InvertedIndex):
         compressed_tf_list = self.postings_encoding.encode_tf(tf_list)
         self.index_file.write(compressed_postings)
         self.index_file.write(compressed_tf_list)
-        self.postings_dict[term] = (curr_position_in_byte, len(postings_list), \
-                                    len(compressed_postings), len(compressed_tf_list))
+
+        # max_tf disimpan sebagai elemen ke-5 pada 5-tuple postings_dict.
+        # Digunakan oleh WAND untuk menghitung BM25 upper bound per term
+        # tanpa harus membaca seluruh postings list dari disk.
+        max_tf = max(tf_list) if tf_list else 0
+        self.postings_dict[term] = (curr_position_in_byte, len(postings_list),
+                                    len(compressed_postings), len(compressed_tf_list),
+                                    max_tf)
 
 
 if __name__ == "__main__":
-
     from compression import VBEPostings
 
     with InvertedIndexWriter('test', postings_encoding=VBEPostings, directory='./tmp/') as index:
         index.append(1, [2, 3, 4, 8, 10], [2, 4, 2, 3, 30])
         index.append(2, [3, 4, 5], [34, 23, 56])
         index.index_file.seek(0)
-        assert index.terms == [1,2], "terms salah"
-        assert index.doc_length == {2:2, 3:38, 4:25, 5:56, 8:3, 10:30}, "doc_length salah"
-        assert index.postings_dict == {1: (0, \
-                                           5, \
-                                           len(VBEPostings.encode([2,3,4,8,10])), \
-                                           len(VBEPostings.encode_tf([2,4,2,3,30]))),
-                                       2: (len(VBEPostings.encode([2,3,4,8,10])) + len(VBEPostings.encode_tf([2,4,2,3,30])), \
-                                           3, \
-                                           len(VBEPostings.encode([3,4,5])), \
-                                           len(VBEPostings.encode_tf([34,23,56])))}, "postings dictionary salah"
-        
+        assert index.terms == [1, 2], "terms salah"
+        assert index.doc_length == {2: 2, 3: 38, 4: 25, 5: 56, 8: 3, 10: 30}, "doc_length salah"
+        assert index.postings_dict == {
+            1: (0,
+                5,
+                len(VBEPostings.encode([2, 3, 4, 8, 10])),
+                len(VBEPostings.encode_tf([2, 4, 2, 3, 30])),
+                30),  # max_tf dari [2,4,2,3,30]
+            2: (len(VBEPostings.encode([2, 3, 4, 8, 10])) + len(VBEPostings.encode_tf([2, 4, 2, 3, 30])),
+                3,
+                len(VBEPostings.encode([3, 4, 5])),
+                len(VBEPostings.encode_tf([34, 23, 56])),
+                56),  # max_tf dari [34,23,56]
+        }, "postings dictionary salah"
+
         index.index_file.seek(index.postings_dict[2][0])
-        assert VBEPostings.decode(index.index_file.read(len(VBEPostings.encode([3,4,5])))) == [3,4,5], "terdapat kesalahan"
-        assert VBEPostings.decode_tf(index.index_file.read(len(VBEPostings.encode_tf([34,23,56])))) == [34,23,56], "terdapat kesalahan"
+        assert VBEPostings.decode(index.index_file.read(len(VBEPostings.encode([3, 4, 5])))) == [3, 4,
+                                                                                                 5], "terdapat kesalahan"
+        assert VBEPostings.decode_tf(index.index_file.read(len(VBEPostings.encode_tf([34, 23, 56])))) == [34, 23,
+                                                                                                          56], "terdapat kesalahan"

@@ -258,6 +258,24 @@ def eval_bm25(qrels, query_file="queries.txt", k=1000, k1=1.2, b=0.75):
                           query_file=query_file, k=k,
                           method_name=f"BM25 k1={k1} b={b}")
 
+def eval_bm25_wand(qrels, query_file="queries.txt", k=1000, k1=1.2, b=0.75):
+    """
+    Evaluasi dengan metode BM25.
+
+    Parameters
+    ----------
+    k1 : float
+        Parameter saturasi TF (default: 1.2).
+    b : float
+        Parameter normalisasi panjang dokumen (default: 0.75).
+    """
+    BSBI = BSBIIndex(data_dir='collection',
+                     postings_encoding=VBEPostings,
+                     output_dir='index')
+    retrieve_fn = lambda query, k: BSBI.retrieve_bm25_wand(query, k=k, k1=k1, b=b)
+    return eval_retrieval(retrieve_fn, qrels,
+                          query_file=query_file, k=k,
+                          method_name=f"BM25_WAND k1={k1} b={b}")
 
 # Alias untuk backward-compatibility
 def eval(qrels, query_file="queries.txt", k=1000):
@@ -306,3 +324,6 @@ if __name__ == '__main__':
 
     print("=" * 55)
     eval_bm25(qrels)
+
+    print("=" * 55)
+    eval_bm25_wand(qrels)
