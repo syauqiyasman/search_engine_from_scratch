@@ -1,7 +1,7 @@
 import array
 
 class StandardPostings:
-    """ 
+    """
     Class dengan static methods, untuk mengubah representasi postings list
     yang awalnya adalah List of integer, berubah menjadi sequence of bytes.
     Kita menggunakan Library array di Python.
@@ -88,8 +88,9 @@ class StandardPostings:
         """
         return StandardPostings.decode(encoded_tf_list)
 
+
 class VBEPostings:
-    """ 
+    """
     Berbeda dengan StandardPostings, dimana untuk suatu postings list,
     yang disimpan di disk adalah sequence of integers asli dari postings
     list tersebut apa adanya.
@@ -115,16 +116,16 @@ class VBEPostings:
         """
         bytes = []
         while True:
-            bytes.insert(0, number % 128) # prepend ke depan
+            bytes.insert(0, number % 128)  # prepend ke depan
             if number < 128:
                 break
             number = number // 128
-        bytes[-1] += 128 # bit awal pada byte terakhir diganti 1
+        bytes[-1] += 128  # bit awal pada byte terakhir diganti 1
         return array.array('B', bytes).tobytes()
 
     @staticmethod
     def vb_encode(list_of_numbers):
-        """ 
+        """
         Melakukan encoding (tentunya dengan compression) terhadap
         list of numbers, dengan Variable-Byte Encoding
         """
@@ -152,7 +153,7 @@ class VBEPostings:
         """
         gap_postings_list = [postings_list[0]]
         for i in range(1, len(postings_list)):
-            gap_postings_list.append(postings_list[i] - postings_list[i-1])
+            gap_postings_list.append(postings_list[i] - postings_list[i - 1])
         return VBEPostings.vb_encode(gap_postings_list)
 
     @staticmethod
@@ -237,6 +238,7 @@ class VBEPostings:
         """
         return VBEPostings.vb_decode(encoded_tf_list)
 
+
 class EliasGammaPostings:
     """
     Implementasi Elias-Gamma Encoding untuk postings list.
@@ -275,20 +277,27 @@ class EliasGammaPostings:
         # convert ke bytes
         byte_array = bytearray()
         for i in range(0, len(bitstream), 8):
-            byte_array.append(int(bitstream[i:i+8], 2))
+            byte_array.append(int(bitstream[i:i + 8], 2))
 
         return bytes(byte_array)
 
     @staticmethod
     def encode(postings_list):
         """
-        Encode postings list dengan gap + Elias-Gamma
+        Encode postings list dengan gap + Elias-Gamma.
+
+        Elias-Gamma hanya mendukung bilangan bulat positif (≥ 1).
+        Doc IDs dan gap antar doc ID bisa bernilai 0 (misal doc_id pertama = 0,
+        atau gap = 0 karena duplikat). Untuk mengatasinya, setiap nilai
+        di-shift +1 sebelum di-encode, dan di-shift -1 saat decode.
+        Ini menjamin semua nilai yang di-encode selalu ≥ 1.
         """
         gap_postings_list = [postings_list[0]]
         for i in range(1, len(postings_list)):
-            gap_postings_list.append(postings_list[i] - postings_list[i-1])
+            gap_postings_list.append(postings_list[i] - postings_list[i - 1])
 
-        return EliasGammaPostings.gamma_encode(gap_postings_list)
+        # shift +1 agar nilai 0 (doc_id pertama = 0, atau gap = 0) bisa di-encode
+        return EliasGammaPostings.gamma_encode([v + 1 for v in gap_postings_list])
 
     @staticmethod
     def encode_tf(tf_list):
@@ -324,7 +333,7 @@ class EliasGammaPostings:
             if i + zeros > n:
                 break
 
-            offset = bitstream[i:i+zeros]
+            offset = bitstream[i:i + zeros]
             i += zeros
 
             binary = '1' + offset
@@ -336,15 +345,18 @@ class EliasGammaPostings:
     @staticmethod
     def decode(encoded_postings_list):
         """
-        Decode postings (ingat: masih gap-based → harus direkonstruksi)
+        Decode postings (ingat: masih gap-based → harus direkonstruksi).
+        Setiap nilai di-shift -1 untuk membalik shift +1 yang diterapkan
+        saat encode.
         """
         decoded_gaps = EliasGammaPostings.gamma_decode(encoded_postings_list)
 
-        total = decoded_gaps[0]
+        # shift -1 untuk membalik shift +1 yang diterapkan saat encode
+        total = decoded_gaps[0] - 1
         postings = [total]
 
         for i in range(1, len(decoded_gaps)):
-            total += decoded_gaps[i]
+            total += decoded_gaps[i] - 1
             postings.append(total)
 
         return postings
@@ -353,8 +365,9 @@ class EliasGammaPostings:
     def decode_tf(encoded_tf_list):
         return EliasGammaPostings.gamma_decode(encoded_tf_list)
 
+
 if __name__ == '__main__':
-    
+
     postings_list = [34, 67, 89, 454, 2345738]
     tf_list = [12, 10, 3, 4, 1]
     for Postings in [StandardPostings, VBEPostings, EliasGammaPostings]:
@@ -365,7 +378,7 @@ if __name__ == '__main__':
         print("ukuran encoded postings   : ", len(encoded_postings_list), "bytes")
         print("byte hasil encode TF list : ", encoded_tf_list)
         print("ukuran encoded postings   : ", len(encoded_tf_list), "bytes")
-        
+
         decoded_posting_list = Postings.decode(encoded_postings_list)
         decoded_tf_list = Postings.decode_tf(encoded_tf_list)
         print("hasil decoding (postings): ", decoded_posting_list)
