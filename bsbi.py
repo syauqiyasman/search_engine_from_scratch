@@ -527,8 +527,209 @@ class BSBIIndex:
                 self.merge(indices, merged_index)
 
 
+class SPIMIIndex(BSBIIndex):
+    """
+    Indexing dengan algoritma SPIMI (Single-Pass In-Memory Indexing).
+
+    Perbedaan mendasar dari BSBI
+    ─────────────────────────────
+    BSBI                                SPIMI
+    ──────────────────────────────────  ──────────────────────────────────────
+    Block = satu sub-direktori          Block = sejumlah token (block_size)
+    Kumpulkan semua (termID, docID)     Proses token satu per satu, langsung
+    terlebih dahulu, lalu sort          masukkan ke hashtable tanpa sort dulu
+    Perlu termID global sebelum sort    TermID di-assign hanya saat flush
+    Sort = O(n log n) per block         Tidak ada sort di awal; sort hanya
+                                        pada keys hashtable saat flush
+
+    Cara kerja
+    ──────────
+    1. Stream dokumen satu per satu lintas seluruh koleksi.
+    2. Setiap token langsung dimasukkan ke in-memory hashtable:
+           token_str  →  {doc_id: tf}
+       Tidak ada konversi ke termID dulu — ini yang membedakan SPIMI.
+    3. Saat jumlah token mencapai `block_size`, flush in-memory index ke disk:
+       a. Sort kunci hashtable (string) secara alfabetis.
+       b. Untuk setiap token (terurut), assign/lookup termID global di
+          self.term_id_map.
+       c. Tulis ke intermediate InvertedIndexWriter.
+       d. Reset hashtable.
+    4. Setelah semua dokumen diproses, flush sisa token.
+    5. Merge semua intermediate index (sama persis dengan BSBI).
+
+    Keunggulan SPIMI vs BSBI
+    ────────────────────────
+    - Lebih hemat memori: tidak perlu menampung seluruh td_pairs sebuah
+      block sebelum inversion; hashtable langsung di-update in-place.
+    - Tidak perlu global termID sebelum sorting; termID di-assign saat flush
+      sehingga bisa menangani koleksi yang lebih besar.
+    - Block size fleksibel (berbasis jumlah token, bukan struktur direktori).
+
+    Semua method retrieval (retrieve_tfidf, retrieve_bm25, retrieve_bm25_wand)
+    dan merge diwarisi dari BSBIIndex tanpa perubahan karena format index
+    yang dihasilkan identik.
+
+    Attributes
+    ──────────
+    block_size : int
+        Jumlah maksimum token yang ditampung di memori sebelum di-flush ke
+        disk sebagai satu intermediate index. Default: 1_000_000.
+    """
+
+    def __init__(self, data_dir, output_dir, postings_encoding,
+                 index_name='main_index', block_size=1_000_000):
+        """
+        Parameters
+        ----------
+        data_dir : str
+            Path ke direktori koleksi dokumen.
+        output_dir : str
+            Path ke direktori output untuk menyimpan file index.
+        postings_encoding : class
+            Kelas encoding postings (misal VBEPostings, StandardPostings).
+        index_name : str
+            Nama file index akhir (default: 'main_index').
+        block_size : int
+            Jumlah token maksimum per in-memory block sebelum flush ke disk.
+            Turunkan nilai ini jika RAM terbatas; naikkan untuk mempercepat
+            indexing jika RAM cukup (default: 1_000_000).
+        """
+        super().__init__(data_dir, output_dir, postings_encoding, index_name)
+        self.block_size = block_size
+
+    def _flush_block(self, in_memory_index, block_id):
+        """
+        Flush satu in-memory index block ke disk sebagai intermediate index.
+
+        Langkah-langkah:
+        1. Sort token string secara alfabetis — inilah satu-satunya sort
+           yang terjadi di SPIMI, dan hanya dilakukan saat flush.
+        2. Untuk setiap token (sudah terurut), assign/lookup termID global
+           di self.term_id_map. TermID baru di-assign on-the-fly di sini,
+           bukan di awal seperti BSBI.
+        3. Sort ulang entries berdasarkan termID sebelum ditulis ke disk.
+
+           Langkah ini krusial: InvertedIndexReader menghasilkan items dalam
+           urutan penulisan (= urutan termID), dan heapq.merge di merge()
+           MENGASUMSIKAN setiap file sudah terurut ascending by termID.
+           Pada block pertama, termID kebetulan sudah mengikuti urutan
+           alfabet (karena term baru semua). Namun pada block ke-2 dan
+           seterusnya, term yang sudah dikenal di block sebelumnya mendapat
+           termID lama, sehingga urutan alfabet ≠ urutan termID. Tanpa
+           re-sort ini, heapq.merge akan menghasilkan output yang salah.
+
+        4. Tulis pasangan (termID, postings, tf_list) ke InvertedIndexWriter.
+
+        Parameters
+        ----------
+        in_memory_index : dict
+            Hashtable { token_str -> { doc_id: tf } } yang akan di-flush.
+        block_id : int
+            Nomor urut block; digunakan untuk memberi nama file intermediate.
+        """
+        index_id = f'spimi_block_{block_id}'
+        self.intermediate_indices.append(index_id)
+
+        with InvertedIndexWriter(index_id, self.postings_encoding,
+                                 directory=self.output_dir) as index:
+            # Langkah 1-2: sort string → assign termID
+            # Sorting string dahulu memanfaatkan sifat Trie yang secara alami
+            # mengiterasi dalam urutan leksikografis (DFS in-order), sehingga
+            # penjelajahan prefix bersama hanya dilakukan sekali.
+            entries = []
+            for token in sorted(in_memory_index.keys()):
+                term_id = self.term_id_map[token]  # assign/lookup in Trie
+                postings_tf = in_memory_index[token]  # {doc_id: tf}
+                sorted_doc_ids = sorted(postings_tf.keys())
+                tf_list = [postings_tf[d] for d in sorted_doc_ids]
+                entries.append((term_id, sorted_doc_ids, tf_list))
+
+            # Langkah 3: sort by termID — wajib agar heapq.merge bekerja benar
+            entries.sort(key=lambda x: x[0])
+
+            # Langkah 4: tulis ke disk
+            for term_id, sorted_doc_ids, tf_list in entries:
+                index.append(term_id, sorted_doc_ids, tf_list)
+
+    def index(self):
+        """
+        SPIMI indexing: single-pass in-memory indexing.
+
+        Stream seluruh koleksi token per token. In-memory index di-maintain
+        sebagai hashtable. Saat jumlah token dalam block mencapai block_size,
+        flush ke disk dan reset. Setelah semua dokumen selesai, merge semua
+        intermediate index menjadi satu main index.
+
+        Tidak ada pemanggilan parse_block atau invert_write dari BSBIIndex —
+        SPIMI menangani parsing dan inversion secara terpadu dalam satu pass.
+        """
+        in_memory_index = {}  # { token_str -> { doc_id: tf } }
+        n_tokens_in_block = 0
+        block_id = 0
+
+        all_block_dirs = sorted(next(os.walk(self.data_dir))[1])
+
+        for block_dir in tqdm(all_block_dirs, desc='SPIMI indexing'):
+            block_path = './' + self.data_dir + '/' + block_dir
+            for filename in sorted(next(os.walk(block_path))[2]):
+                doc_path = block_path + '/' + filename
+                # doc_id di-assign global (sama dengan BSBI)
+                doc_id = self.doc_id_map[doc_path]
+
+                with open(doc_path, 'r', encoding='utf-8',
+                          errors='surrogateescape') as f:
+                    for token in f.read().split():
+
+                        # ── Inti SPIMI: langsung update hashtable ────────
+                        # Tidak ada konversi ke termID dulu; tidak ada sort.
+                        # Jika term baru, buat entry; jika sudah ada, cukup
+                        # update TF. Inilah keunggulan SPIMI dibanding BSBI.
+                        if token not in in_memory_index:
+                            in_memory_index[token] = {}
+                        tf_map = in_memory_index[token]
+                        tf_map[doc_id] = tf_map.get(doc_id, 0) + 1
+                        n_tokens_in_block += 1
+
+                        # ── Flush jika block penuh ───────────────────────
+                        if n_tokens_in_block >= self.block_size:
+                            self._flush_block(in_memory_index, block_id)
+                            in_memory_index = {}
+                            n_tokens_in_block = 0
+                            block_id += 1
+
+        # Flush sisa token yang belum sempat di-flush
+        if in_memory_index:
+            self._flush_block(in_memory_index, block_id)
+
+        self.save()
+
+        # Merge semua intermediate index — identik dengan BSBI
+        with InvertedIndexWriter(self.index_name, self.postings_encoding,
+                                 directory=self.output_dir) as merged_index:
+            with contextlib.ExitStack() as stack:
+                indices = [stack.enter_context(
+                    InvertedIndexReader(idx_id, self.postings_encoding,
+                                        directory=self.output_dir))
+                    for idx_id in self.intermediate_indices]
+                self.merge(indices, merged_index)
+
+
 if __name__ == "__main__":
-    BSBI_instance = BSBIIndex(data_dir='collection', \
-                              postings_encoding=VBEPostings, \
-                              output_dir='index')
-    BSBI_instance.index()  # memulai indexing!
+    import sys
+
+    mode = sys.argv[1] if len(sys.argv) > 1 else 'bsbi'
+
+    if mode == 'spimi':
+        # SPIMI: block_size = jumlah token per flush (turunkan jika RAM terbatas)
+        indexer = SPIMIIndex(data_dir='collection',
+                             postings_encoding=VBEPostings,
+                             output_dir='index',
+                             block_size=1_000_000)
+        print('Memulai indexing dengan SPIMI...')
+    else:
+        indexer = BSBIIndex(data_dir='collection',
+                            postings_encoding=VBEPostings,
+                            output_dir='index')
+        print('Memulai indexing dengan BSBI...')
+
+    indexer.index()
