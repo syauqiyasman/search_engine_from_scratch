@@ -2,5 +2,7 @@
 .DS_Store
 .venv
 __pycache__/
-index
-tmp
+index/*
+!index/.gitkeep
+tmp/*
+!tmp/.gitkeep
